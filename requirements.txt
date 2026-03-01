@@ -1,0 +1,40 @@
+# Advanced RAG System - Python dependencies
+# CPU-only build (no CUDA required)
+# Install order matters: install torch first with CPU index,
+# then install remaining packages.
+
+# Embeddings & Reranking (local, CPU)
+sentence-transformers==3.4.1
+torchvision==0.17.2
+
+# Vector Index
+faiss-cpu==1.8.0
+
+# Sparse Retrieval
+rank-bm25==0.2.2
+nltk==3.9.3
+
+# PDF Parsing
+pdfplumber==0.11.9
+pypdf==5.1.0
+
+# LLM API Clients
+openai==1.59.7
+anthropic==0.40.0
+groq>=0.13.0
+
+# Web UI
+streamlit==1.41.1
+
+# Configuration & Validation
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+
+# Utilities
+numpy==1.26.4
+scikit-learn==1.4.2
+joblib==1.4.2
+tqdm==4.66.5
+tenacity==9.0.0
+rouge-score==0.1.2
