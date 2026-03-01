@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 📚 Advanced RAG System
 
 A research-grade **Retrieval-Augmented Generation (RAG)** system for multi-document PDF question answering, with hybrid retrieval, cross-encoder reranking, and faithfulness-guided hallucination mitigation.
@@ -140,3 +141,6 @@ MIT License — free to use, modify, and distribute.
 ## 👤 Author
 
 **Aviral** — [@aviral2429](https://github.com/aviral2429)
+=======
+# advanced-rag-system
+>>>>>>> d5b2c1cadb488298d9ded51a84a6a2b74b557290

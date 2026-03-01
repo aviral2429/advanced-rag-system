@@ -26,6 +26,11 @@ groq>=0.13.0
 # Web UI
 streamlit==1.41.1
 
+# REST API Backend
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+
 # Configuration & Validation
 pydantic==2.10.4
 pydantic-settings==2.7.0
