@@ -372,6 +372,8 @@ with tab_chat:
             "<div style='text-align:center;padding:3rem;opacity:0.5'>"
             "<h3>📄 No PDF indexed yet</h3>"
             "<p>Go to the <strong>Upload &amp; Index</strong> tab to get started.</p>"
+            "<p style='font-size:0.85em'>If you already indexed a PDF but still see this, "
+            "check the Upload tab for any error messages shown in red.</p>"
             "</div>",
             unsafe_allow_html=True,
         )
@@ -382,32 +384,50 @@ with tab_chat:
 with tab_upload:
     st.subheader("📄 Upload & Index Documents")
 
-    if st.session_state.cloud_mode == "upload":
-        uploaded_file = st.file_uploader(
-            "Drop a PDF file here", type=["pdf"], label_visibility="collapsed"
+    # ── Groq API key status hint ──────────────────────────────────────────────
+    if not groq_api_key:
+        st.warning("⚠️ No Groq API key found. Enter your key in the sidebar before indexing.")
+    else:
+        key_src = "from .env file" if os.getenv("GROQ_API_KEY") else "entered manually"
+        st.success(f"✅ Groq API key ready ({key_src}).")
+
+    st.divider()
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Section A — Upload a new PDF
+    # ────────────────────────────────────────────────────────────────────────
+    st.markdown("### 📤 Upload New PDF")
+
+    uploaded_file = st.file_uploader(
+        "Drop a PDF file here", type=["pdf"], label_visibility="collapsed"
+    )
+
+    if _supabase_ok:
+        save_to_cloud = st.checkbox("☁️ Save to cloud (Supabase)", value=True)
+    else:
+        save_to_cloud = False
+        st.caption(
+            "ℹ️ Cloud save disabled — Supabase not configured or import failed. "
+            "Check that SUPABASE_URL and SUPABASE_ANON_KEY are in your .env."
         )
 
-        if _supabase_ok:
-            save_to_cloud = st.checkbox("☁️ Save to cloud (Supabase)", value=True)
+    if st.button("⚡ Index PDF", use_container_width=True, type="primary", key="btn_index_upload"):
+        if not uploaded_file:
+            st.warning("Please upload a PDF first.")
+        elif not groq_api_key:
+            st.warning("Please enter your Groq API key in the sidebar.")
         else:
-            save_to_cloud = False
-
-        if st.button("⚡ Index PDF", use_container_width=True, type="primary"):
-            if not uploaded_file:
-                st.warning("Please upload a PDF first.")
-            elif not groq_api_key:
-                st.warning("Please enter your Groq API key in the sidebar.")
-            else:
-                with st.status("Indexing document …", expanded=True) as status:
-
+            _index_ok = False
+            with st.status("Indexing document …", expanded=True) as status:
+                try:
                     # Optional Supabase upload
                     if _supabase_ok and save_to_cloud:
                         st.write("☁️ Uploading to Supabase Storage…")
                         try:
                             upload_pdf(uploaded_file.getvalue(), uploaded_file.name)
                             st.write(f"✅ '{uploaded_file.name}' saved to cloud.")
-                        except Exception as e:
-                            st.write(f"⚠️ Cloud upload failed (indexing locally only): {e}")
+                        except Exception as ce:
+                            st.write(f"⚠️ Cloud upload failed (indexing locally only): {ce}")
                     elif _supabase_ok:
                         st.write("🖥️ Indexing locally (cloud save disabled).")
 
@@ -424,10 +444,10 @@ with tab_upload:
 
                     # Build index
                     st.write("🧠 Building embeddings & FAISS index…")
-                    emb      = get_cached_embeddings()
-                    vs       = create_vector_store(chunks, emb)
+                    emb       = get_cached_embeddings()
+                    vs        = create_vector_store(chunks, emb)
                     retriever = get_retriever(vs, k=top_k)
-                    chain    = build_qa_chain(retriever, groq_api_key, model_name=model_choice)
+                    chain     = build_qa_chain(retriever, groq_api_key, model_name=model_choice)
                     st.write("✅ Index ready.")
 
                     st.session_state.vectorstore  = vs
@@ -435,39 +455,65 @@ with tab_upload:
                     st.session_state.indexed_file = uploaded_file.name
                     st.session_state.messages     = []
                     status.update(label="✅ Indexing complete!", state="complete")
+                    _index_ok = True
 
-                st.success(f"✅ '{uploaded_file.name}' indexed! Switch to the 💬 Chat tab →")
+                except Exception as err:
+                    status.update(label="❌ Indexing failed!", state="error")
+                    st.error(f"**Indexing error:** {err}")
+                    import traceback
+                    st.code(traceback.format_exc(), language="python")
 
+            if _index_ok:
+                # Rerun so the Chat tab picks up the new qa_chain from session state
+                st.rerun()
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Section B — Load a previously uploaded PDF from Supabase cloud
+    # ────────────────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### ☁️ Select Previously Uploaded PDF from Cloud")
+
+    if not _supabase_ok:
+        st.info(
+            "Supabase is not connected. Once you configure SUPABASE_URL and "
+            "SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY) in your .env, "
+            "previously uploaded PDFs will appear here."
+        )
     else:
-        # ─ Select saved PDF from Supabase ───────────────────────────────────
-        with st.spinner("Fetching cloud PDFs…"):
-            try:
-                cloud_pdfs = list_pdfs()
-            except Exception as e:
-                st.error(f"Could not connect to Supabase: {e}")
-                cloud_pdfs = []
+        _refresh = st.button("🔄 Refresh list", key="btn_refresh_cloud")
+        if _refresh:
+            with st.spinner("Fetching cloud PDFs…"):
+                try:
+                    st.session_state["_cloud_pdf_list"] = list_pdfs()
+                except Exception as e:
+                    st.error(f"Could not connect to Supabase: {e}")
+                    st.session_state["_cloud_pdf_list"] = []
+
+        cloud_pdfs = st.session_state.get("_cloud_pdf_list", [])
 
         if not cloud_pdfs:
-            st.info("No PDFs found in Supabase cloud. Upload one first.")
+            st.info("No PDFs found in Supabase cloud. Upload one above and tick '☁️ Save to cloud'.")
         else:
-            selected_pdf = st.selectbox("Select a cloud PDF", cloud_pdfs)
+            selected_pdf = st.selectbox("Select a cloud PDF", cloud_pdfs, key="cloud_pdf_selector")
             col1, col2  = st.columns(2)
-            load_btn    = col1.button("⚡ Load & Index", use_container_width=True)
-            delete_btn  = col2.button("🗑️ Delete",       use_container_width=True)
+            load_btn    = col1.button("⚡ Load & Index from Cloud", use_container_width=True, key="btn_load_cloud")
+            delete_btn  = col2.button("🗑️ Delete from Cloud",       use_container_width=True, key="btn_delete_cloud")
 
             if delete_btn:
                 with st.spinner(f"Deleting '{selected_pdf}'…"):
                     try:
                         delete_pdf(selected_pdf)
                         st.success(f"Deleted '{selected_pdf}' from Supabase.")
+                        st.session_state["_cloud_pdf_list"] = [p for p in cloud_pdfs if p != selected_pdf]
                         st.rerun()
                     except Exception as e:
                         st.error(f"Delete failed: {e}")
 
             if load_btn:
                 if not groq_api_key:
-                    st.warning("Please enter your Groq API key.")
+                    st.warning("Please enter your Groq API key in the sidebar.")
                 else:
+                    _load_ok = False
                     with st.status(f"Loading '{selected_pdf}' from Supabase…",
                                    expanded=True) as status:
                         try:
@@ -476,12 +522,7 @@ with tab_upload:
                             st.write("📥 Downloading PDF…")
                             docs = load_pdf_from_url(url)
                             st.write(f"✅ Loaded {len(docs)} page(s).")
-                        except Exception as e:
-                            st.error(f"Failed to fetch from Supabase: {e}")
-                            docs = []
-                            status.update(label="Load failed.", state="error")
 
-                        if docs:
                             st.write("✂️ Splitting chunks…")
                             chunks = split_documents(docs, chunk_size=chunk_size,
                                                      chunk_overlap=chunk_overlap)
@@ -500,7 +541,17 @@ with tab_upload:
                             st.session_state.indexed_file = selected_pdf
                             st.session_state.messages     = []
                             status.update(label="✅ Ready!", state="complete")
-                            st.success(f"✅ '{selected_pdf}' indexed! Switch to 💬 Chat →")
+                            _load_ok = True
+
+                        except Exception as err:
+                            status.update(label="❌ Load failed!", state="error")
+                            st.error(f"**Load error:** {err}")
+                            import traceback
+                            st.code(traceback.format_exc(), language="python")
+
+                    if _load_ok:
+                        # Rerun so the Chat tab picks up the new qa_chain from session state
+                        st.rerun()
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3 — Evaluation Dashboard
