@@ -6,7 +6,10 @@ falling back to anon key. Fixes RLS policy 403 errors.
 """
 
 import os
+from dotenv import load_dotenv
 from supabase import create_client, Client
+
+load_dotenv()  # Load .env file automatically
 
 BUCKET = "pdfs"
 _client: Client | None = None

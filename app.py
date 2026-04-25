@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -149,16 +150,80 @@ def get_cached_embeddings():
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for k, v in {
-    "messages":     [],
-    "vectorstore":  None,
-    "qa_chain":     None,
-    "indexed_file": None,
-    "cloud_mode":   "upload",
+    "messages":        [],
+    "vectorstore":     None,
+    "qa_chain":        None,
+    "indexed_file":    None,
+    "cloud_mode":      "upload",
+    # Mock test state
+    "mcq_questions":   None,   # list of dicts
+    "mcq_answers":     {},     # {idx: selected_option_letter}
+    "mcq_submitted":   False,
+    "mcq_generating":  False,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+# ── MCQ Generator ────────────────────────────────────────────────────────────
+
+def _generate_mcqs(vectorstore, groq_api_key: str, model_name: str,
+                   n_questions: int = 10, difficulty: str = "Medium") -> list:
+    """
+    Pull random chunks from the vector store and ask Groq to generate MCQs.
+    Returns a list of dicts: {question, options: {A,B,C,D}, answer, explanation}
+    """
+    from langchain_groq import ChatGroq
+
+    # Sample diverse chunks from the vectorstore
+    all_docs = vectorstore.similarity_search("overview summary main topic", k=20)
+    context  = "\n\n".join(d.page_content for d in all_docs)[:12000]
+
+    prompt = f"""You are an expert educator. Based ONLY on the document context below, \
+create exactly {n_questions} multiple-choice questions at {difficulty} difficulty.
+
+Rules:
+- Each question must have exactly 4 options labeled A, B, C, D
+- Exactly one option is correct
+- Include a brief explanation (1-2 sentences) for the correct answer
+- Base questions strictly on the provided context
+- Return ONLY a valid JSON array, no extra text
+
+Format (return ONLY this JSON, nothing else):
+[
+  {{
+    "question": "Question text here?",
+    "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
+    "answer": "A",
+    "explanation": "Brief explanation why A is correct."
+  }}
+]
+
+Document context:
+{context}
+
+Generate the JSON now:"""
+
+    llm = ChatGroq(
+        api_key=groq_api_key,
+        model_name=model_name,
+        temperature=0.4,
+        max_tokens=4096,
+    )
+    response = llm.invoke(prompt)
+    raw = response.content.strip()
+
+    # Extract JSON array from response
+    match = re.search(r'\[.*\]', raw, re.DOTALL)
+    if not match:
+        raise ValueError(f"LLM did not return valid JSON.\n\nRaw response:\n{raw[:500]}")
+    questions = json.loads(match.group())
+    # Validate structure
+    for q in questions:
+        assert "question" in q and "options" in q and "answer" in q
+    return questions
+
 
 def _compute_faithfulness(answer: str, sources: list) -> float:
     """Cosine similarity between answer embedding and source context embedding (0–1)."""
@@ -316,8 +381,8 @@ st.caption(
 )
 st.divider()
 
-tab_chat, tab_upload, tab_eval, tab_precision = st.tabs([
-    "💬 Chat", "📄 Upload & Index", "📊 Evaluation", "🔬 Precision Matrix"
+tab_chat, tab_upload, tab_test, tab_eval, tab_precision = st.tabs([
+    "💬 Chat", "📄 Upload & Index", "🧪 Mock Test", "📊 Evaluation", "🔬 Precision Matrix"
 ])
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -554,7 +619,184 @@ with tab_upload:
                         st.rerun()
 
 # ════════════════════════════════════════════════════════════════════════════
-# TAB 3 — Evaluation Dashboard
+# TAB 3 — Mock Test
+# ════════════════════════════════════════════════════════════════════════════
+with tab_test:
+    st.markdown("## 🧪 Mock Test")
+    st.caption("Auto-generated MCQs from your indexed PDF · Answer · Get scored instantly")
+
+    if not st.session_state.qa_chain or not st.session_state.vectorstore:
+        st.markdown(
+            "<div style='text-align:center;padding:3rem;opacity:0.5'>"
+            "<h3>📄 No PDF indexed yet</h3>"
+            "<p>Go to the <strong>Upload &amp; Index</strong> tab first, then come back here.</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        # ── Controls ──────────────────────────────────────────────────────────
+        st.markdown(f"**Active document:** `{st.session_state.indexed_file}`")
+        st.divider()
+
+        ctrl1, ctrl2, ctrl3 = st.columns([1, 1, 2])
+        n_qs         = ctrl1.selectbox("Number of questions", [5, 10, 15, 20], index=1)
+        difficulty   = ctrl2.selectbox("Difficulty", ["Easy", "Medium", "Hard"], index=1)
+        gen_btn      = ctrl3.button(
+            "✨ Generate New Test",
+            use_container_width=True,
+            type="primary",
+            key="btn_gen_mcq",
+        )
+
+        if gen_btn:
+            if not groq_api_key:
+                st.warning("Please enter your Groq API key in the sidebar.")
+            else:
+                with st.spinner(f"🤖 Generating {n_qs} {difficulty} MCQs from the PDF…"):
+                    try:
+                        qs = _generate_mcqs(
+                            st.session_state.vectorstore,
+                            groq_api_key,
+                            model_choice,
+                            n_questions=n_qs,
+                            difficulty=difficulty,
+                        )
+                        st.session_state.mcq_questions = qs
+                        st.session_state.mcq_answers   = {}
+                        st.session_state.mcq_submitted  = False
+                        st.success(f"✅ {len(qs)} questions generated!")
+                    except Exception as ex:
+                        st.error(f"MCQ generation failed: {ex}")
+
+        # ── Quiz UI ───────────────────────────────────────────────────────────
+        if st.session_state.mcq_questions:
+            questions = st.session_state.mcq_questions
+            submitted = st.session_state.mcq_submitted
+
+            st.divider()
+            if not submitted:
+                st.markdown(f"### 📝 Answer all {len(questions)} questions below")
+                st.caption("Select one option per question, then click **Submit Test**.")
+
+            for i, q in enumerate(questions):
+                letter_map = {"A": 0, "B": 1, "C": 2, "D": 3}
+                opts       = q["options"]
+                opt_labels = [f"{k}. {v}" for k, v in opts.items()]
+
+                if not submitted:
+                    # ── Unanswered question ────────────────────────────────
+                    st.markdown(
+                        f"<div style='background:rgba(255,255,255,0.04);border:1px solid "
+                        f"rgba(255,255,255,0.10);border-radius:12px;padding:1rem 1.4rem;"
+                        f"margin-bottom:0.8rem'>"
+                        f"<strong>Q{i+1}.</strong> {q['question']}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    chosen = st.radio(
+                        label=f"q_{i}",
+                        options=opt_labels,
+                        index=None,
+                        key=f"mcq_radio_{i}",
+                        label_visibility="collapsed",
+                    )
+                    if chosen:
+                        st.session_state.mcq_answers[i] = chosen[0]  # first char = A/B/C/D
+
+                else:
+                    # ── Reviewed question ──────────────────────────────────
+                    user_ans    = st.session_state.mcq_answers.get(i, "—")
+                    correct_ans = q["answer"]
+                    is_correct  = user_ans == correct_ans
+
+                    border_color = "#00d4aa" if is_correct else "#f43f5e"
+                    icon         = "✅" if is_correct else "❌"
+                    bg           = "rgba(0,212,170,0.07)" if is_correct else "rgba(244,63,94,0.07)"
+
+                    st.markdown(
+                        f"<div style='background:{bg};border:1px solid {border_color};"
+                        f"border-radius:12px;padding:1rem 1.4rem;margin-bottom:0.8rem'>"
+                        f"<strong>{icon} Q{i+1}.</strong> {q['question']}<br><br>",
+                        unsafe_allow_html=True,
+                    )
+                    for letter, text in opts.items():
+                        if letter == correct_ans and letter == user_ans:
+                            tag = "✅ <strong style='color:#00d4aa'>"
+                        elif letter == correct_ans:
+                            tag = "☑️ <strong style='color:#00d4aa'>"
+                        elif letter == user_ans:
+                            tag = "❌ <strong style='color:#f43f5e'>"
+                        else:
+                            tag = "&nbsp;&nbsp; <span style='opacity:0.6'>"
+                        close = "</strong>" if letter in (correct_ans, user_ans) else "</span>"
+                        st.markdown(
+                            f"<div style='margin-left:1rem'>{tag}{letter}. {text}{close}</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                    explanation = q.get("explanation", "")
+                    if explanation:
+                        st.markdown(
+                            f"<div style='margin-top:0.5rem;font-size:0.88em;"
+                            f"color:#b0b0d0;padding-left:0.5rem'>"
+                            f"💡 <em>{explanation}</em></div>",
+                            unsafe_allow_html=True,
+                        )
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            st.divider()
+
+            if not submitted:
+                # ── Submit button ──────────────────────────────────────────
+                n_answered = len(st.session_state.mcq_answers)
+                if n_answered < len(questions):
+                    st.warning(f"⚠️ You've answered {n_answered}/{len(questions)} questions. "
+                               "You can still submit — unanswered ones count as wrong.")
+                if st.button("🏁 Submit Test", use_container_width=True,
+                             type="primary", key="btn_submit_mcq"):
+                    st.session_state.mcq_submitted = True
+                    st.rerun()
+
+            else:
+                # ── Score card ─────────────────────────────────────────────
+                correct = sum(
+                    1 for i, q in enumerate(questions)
+                    if st.session_state.mcq_answers.get(i) == q["answer"]
+                )
+                total   = len(questions)
+                pct     = correct / total
+
+                if pct >= 0.8:
+                    grade, color, emoji = "Excellent! 🏆", "#00d4aa", "🟢"
+                elif pct >= 0.6:
+                    grade, color, emoji = "Good job! 👍", "#7c6aff", "🟡"
+                elif pct >= 0.4:
+                    grade, color, emoji = "Needs improvement 📚", "#f59e0b", "🟠"
+                else:
+                    grade, color, emoji = "Keep studying! 💪", "#f43f5e", "🔴"
+
+                st.markdown(
+                    f"<div style='text-align:center;background:rgba(255,255,255,0.05);"
+                    f"border:2px solid {color};border-radius:16px;padding:2rem;"
+                    f"margin-bottom:1.5rem'>"
+                    f"<h2 style='color:{color};margin:0'>{emoji} {correct}/{total}</h2>"
+                    f"<h3 style='color:{color};margin:0.4rem 0'>{grade}</h3>"
+                    f"<p style='opacity:0.7;margin:0'>Score: {pct:.0%}</p>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.metric("✅ Correct",   correct)
+                sc2.metric("❌ Wrong",     total - correct)
+                sc3.metric("📊 Score",     f"{pct:.0%}")
+
+                if st.button("🔄 Retake Test", use_container_width=True, key="btn_retake"):
+                    st.session_state.mcq_answers  = {}
+                    st.session_state.mcq_submitted = False
+                    st.rerun()
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Evaluation Dashboard
 # ════════════════════════════════════════════════════════════════════════════
 with tab_eval:
     st.subheader("📊 Evaluation Dashboard")

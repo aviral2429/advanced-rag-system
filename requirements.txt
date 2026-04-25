@@ -6,7 +6,6 @@ faiss-cpu>=1.8.0
 pypdf>=3.4.0
 sentence-transformers>=2.7.0
 python-dotenv>=1.0.0
-groq>=1.0.0
 pandas>=2.0.0
 numpy>=1.26.0
 plotly>=5.18.0
